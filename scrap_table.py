@@ -1,64 +1,56 @@
-import requests
-from bs4 import BeautifulSoup
-import boto3
+import os
 import uuid
+import requests
+import boto3
+
+IGP_API_URL = os.environ.get(
+    "IGP_API_URL",
+    "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/2026",  # CONFIRMAR en DevTools
+)
+TABLE_NAME = "TablaSismosIGP"
+HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
 
 def lambda_handler(event, context):
-    # URL de la página web que contiene la tabla
-    url = "https://sgonorte.bomberosperu.gob.pe/24horas/?criterio=/"
+    resp = requests.get(IGP_API_URL, headers=HEADERS, timeout=15)
+    if resp.status_code != 200:
+        return {"statusCode": resp.status_code, "body": "Error al acceder al IGP"}
 
-    # Realizar la solicitud HTTP a la página web
-    response = requests.get(url)
-    if response.status_code != 200:
-        return {
-            'statusCode': response.status_code,
-            'body': 'Error al acceder a la página web'
-        }
+    data = resp.json()
+    if not data:
+        return {"statusCode": 404, "body": "No se encontraron sismos"}
 
-    # Parsear el contenido HTML de la página web
-    soup = BeautifulSoup(response.content, 'html.parser')
+    # Más recientes primero y nos quedamos con los 10 últimos
+    data.sort(key=lambda s: f"{s.get('fecha_local','')} {s.get('hora_local','')}", reverse=True)
+    sismos = []
+    for i, s in enumerate(data[:10], start=1):
+        sismos.append({
+            "id": str(uuid.uuid4()),
+            "numero": i,
+            "reporte": str(s.get("reporte", "")),
+            "referencia": str(s.get("referencia", "")),
+            "fecha_hora_local": f"{s.get('fecha_local','')} {s.get('hora_local','')}",
+            "magnitud": str(s.get("magnitud", "")),
+            "profundidad": str(s.get("profundidad", "")),
+            "latitud": str(s.get("latitud", "")),
+            "longitud": str(s.get("longitud", "")),
+        })
 
-    # Encontrar la tabla en el HTML
-    table = soup.find('table')
-    if not table:
-        return {
-            'statusCode': 404,
-            'body': 'No se encontró la tabla en la página web'
-        }
+    table = boto3.resource("dynamodb").Table(TABLE_NAME)
 
-    # Extraer los encabezados de la tabla
-    headers = [header.text for header in table.find_all('th')]
-
-    # Extraer las filas de la tabla
-    rows = []
-    for row in table.find_all('tr')[1:]:  # Omitir el encabezado
-        cells = row.find_all('td')
-        rows.append({headers[i+1]: cell.text for i, cell in enumerate(cells)})
-
-    # Guardar los datos en DynamoDB
-    dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table('TablaWebScrapping')
-
-    # Eliminar todos los elementos de la tabla antes de agregar los nuevos
+    # Limpiar tabla antes de insertar (con paginación)
+    items = []
     scan = table.scan()
+    items.extend(scan["Items"])
+    while "LastEvaluatedKey" in scan:
+        scan = table.scan(ExclusiveStartKey=scan["LastEvaluatedKey"])
+        items.extend(scan["Items"])
     with table.batch_writer() as batch:
-        for each in scan['Items']:
-            batch.delete_item(
-                Key={
-                    'id': each['id']
-                }
-            )
+        for it in items:
+            batch.delete_item(Key={"id": it["id"]})
 
-    # Insertar los nuevos datos
-    i = 1
-    for row in rows:
-        row['#'] = i
-        row['id'] = str(uuid.uuid4())  # Generar un ID único para cada entrada
-        table.put_item(Item=row)
-        i = i + 1
+    with table.batch_writer() as batch:
+        for s in sismos:
+            batch.put_item(Item=s)
 
-    # Retornar el resultado como JSON
-    return {
-        'statusCode': 200,
-        'body': rows
-    }
+    return {"statusCode": 200, "body": sismos}
