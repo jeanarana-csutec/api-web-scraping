@@ -3,18 +3,15 @@ service: api-web-scraping
 
 provider:
   name: aws
-  runtime: python3.12
+  runtime: python3.10
   memorySize: 1024
   timeout: 30
   iam:
     role: arn:aws:iam::028825348944:role/LabRole
-
-plugins:
-  - serverless-python-requirements
-
 custom:
   pythonRequirements:
     dockerizePip: false
+    pythonBin: python3
 
 functions:
   scrape_table:
